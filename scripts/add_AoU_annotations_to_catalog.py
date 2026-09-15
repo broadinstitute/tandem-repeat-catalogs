@@ -66,6 +66,13 @@ def main():
         for line in line_iterator:
             fields = line.rstrip("\n").split("\t")
             locus_id = fields[col_indices["TRID2"]]
+
+            # annotation_lookup below is keyed by locus_id alone, so a duplicate would silently
+            # overwrite an earlier row's annotations rather than raising. This is the failure mode
+            # of https://github.com/PacificBiosciences/trgt-lps/issues/5, just one step downstream.
+            if locus_id in annotation_lookup:
+                parser.error(f"{args.tsv_path} has duplicate TRID2 value {locus_id}")
+
             motif_size = len(fields[col_indices["longestPureSegmentMotif"]])
 
             annotations = {}

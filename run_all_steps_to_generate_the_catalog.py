@@ -71,7 +71,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--hg38-reference-fasta", default="hg38.fa", help="Path of hg38 reference genome FASTA file")
 parser.add_argument("--gencode-gtf", default="gencode.v46.basic.annotation.gtf.gz", help="Gene annotations GTF file")
 parser.add_argument("--output-prefix", default=f"TRExplorer.repeat_catalog_v{VERSION}.hg38")
-parser.add_argument("--variation-clusters-output-prefix", default=f"TRExplorer.variation_clusters_and_isolated_TRs_v{VERSION}.hg38")
+parser.add_argument("--variation-clusters-output-prefix", default=f"TRExplorer.variation_clusters_and_all_repeats_v{VERSION}.hg38")
+parser.add_argument("--legacy-variation-clusters-output-prefix",
+                    default=f"TRExplorer.variation_clusters_and_isolated_TRs_v{VERSION}.hg38",
+                    help="Output prefix for the superseded catalog that holds a row only for "
+                         "repeats outside a variation cluster. It ships alongside its "
+                         "replacement for one release, so remove this option and the two steps "
+                         "that use it once consumers have migrated.")
 
 parser.add_argument("--only-step", type=int, help="Only run this one step")
 parser.add_argument("--start-with-step", type=int, help="Start with a specific step number")
@@ -514,7 +520,7 @@ EOF
 
     # add variation cluster annotations to the catalog
     if args.variation_clusters_tsv and not args.skip_variation_cluster_annotations:
-        variation_clusters_and_isolated_TRs_release_filename = f"{args.variation_clusters_output_prefix}.TRGT.bed.gz"
+        variation_clusters_and_all_repeats_release_filename = f"{args.variation_clusters_output_prefix}.TRGT.bed.gz"
 
         run(f"""python3 {base_dir}/scripts/add_variation_cluster_annotations_to_catalog.py \
             --verbose \
@@ -524,55 +530,89 @@ EOF
 
         run(f"mv {output_prefix}.EH.with_annotations.with_variation_clusters.json.gz {annotated_catalog_path}", step_number=21)
 
-        run(f"""python3 {base_dir}/scripts/generate_TRGT_catalog_with_isolated_repeats_and_variation_clusters.py \
-            -o {variation_clusters_and_isolated_TRs_release_filename} \
+        run(f"""python3 {base_dir}/scripts/generate_TRGT_catalog_with_variation_clusters_and_all_repeats.py \
+            -o {variation_clusters_and_all_repeats_release_filename} \
             {args.variation_clusters_tsv} \
             {annotated_catalog_path}""", step_number=22)
 
-        release_files.append(variation_clusters_and_isolated_TRs_release_filename)
+        release_files.append(variation_clusters_and_all_repeats_release_filename)
 
-        run(f"python3 {base_dir}/scripts/convert_trgt_catalog_to_longtr_format.py {variation_clusters_and_isolated_TRs_release_filename}",
+        # --name-clusters-by-trid only for this catalog: it is the one that also gives every repeat
+        # a row of its own, so a single-repeat cluster named after its member would collide with it.
+        run(f"python3 {base_dir}/scripts/convert_trgt_catalog_to_longtr_format.py --name-clusters-by-trid {variation_clusters_and_all_repeats_release_filename}",
             step_number=23)
 
-        release_files.append(variation_clusters_and_isolated_TRs_release_filename.replace(".TRGT.bed.gz", ".LongTR.bed.gz"))
+        release_files.append(variation_clusters_and_all_repeats_release_filename.replace(".TRGT.bed.gz", ".LongTR.bed.gz"))
+
+        # trgt reads a bgzipped BED directly, so there is no need to decompress it first. This
+        # catalog holds a row per repeat as well as a row per variation cluster, which means rows
+        # deliberately overlap, and this step is what confirms trgt still accepts them.
+        run(f"trgt validate --genome {args.hg38_reference_fasta} --repeats {variation_clusters_and_all_repeats_release_filename}",
+            step_number=24)
+
+        # The superseded catalog, which holds a row only for repeats that are not inside a variation
+        # cluster. It ships alongside its replacement for one release so consumers have time to
+        # migrate. Delete this block, and the --legacy-variation-clusters-output-prefix option, after
+        # that release.
+        legacy_variation_clusters_release_filename = f"{args.legacy_variation_clusters_output_prefix}.TRGT.bed.gz"
+
+        run(f"""python3 {base_dir}/scripts/generate_TRGT_catalog_with_isolated_repeats_and_variation_clusters.py \
+            -o {legacy_variation_clusters_release_filename} \
+            {args.variation_clusters_tsv} \
+            {annotated_catalog_path}""", step_number=25)
+
+        release_files.append(legacy_variation_clusters_release_filename)
+
+        run(f"python3 {base_dir}/scripts/convert_trgt_catalog_to_longtr_format.py {legacy_variation_clusters_release_filename}",
+            step_number=26)
+
+        release_files.append(legacy_variation_clusters_release_filename.replace(".TRGT.bed.gz", ".LongTR.bed.gz"))
+
+        # The two catalogs above are built by separate scripts from the same TSV and repeat catalog,
+        # so nothing else keeps them in sync. This is what would have caught
+        # https://github.com/PacificBiosciences/trgt-lps/issues/5#issuecomment-5683540748, where the
+        # legacy catalog was missing repeats that the all_repeats catalog (and the HPRC TRGT VCF) had.
+        run(f"""python3 {base_dir}/scripts/validate_variation_cluster_catalogs_are_consistent.py \
+            {variation_clusters_and_all_repeats_release_filename} \
+            {legacy_variation_clusters_release_filename}""", step_number=27)
 
     # annotate overlapping loci and output merged tandem repeat regions
     run(f"""python3 {base_dir}/scripts/annotate_overlapping_loci_and_output_merged_tandem_repeat_regions.py \
         --verbose \
         -o {annotated_catalog_path}.with_overlap_annotations.json.gz \
-        {annotated_catalog_path}""", step_number=24)
-    run(f"mv {annotated_catalog_path}.with_overlap_annotations.json.gz {annotated_catalog_path}", step_number=25)
+        {annotated_catalog_path}""", step_number=28)
+    run(f"mv {annotated_catalog_path}.with_overlap_annotations.json.gz {annotated_catalog_path}", step_number=29)
 
     # add allele frequencies to the catalog
     run(f"""python3 -u {base_dir}/scripts/add_allele_frequency_annotations.py \
             --add-t2t-assembly-frequencies-to-overlapping-loci \
-            -o {annotated_catalog_path}.with_allele_frequencies.json.gz  {annotated_catalog_path}""", step_number=26)
+            -o {annotated_catalog_path}.with_allele_frequencies.json.gz  {annotated_catalog_path}""", step_number=30)
 
-    run(f"mv {annotated_catalog_path}.with_allele_frequencies.json.gz {annotated_catalog_path}", step_number=27)
+    run(f"mv {annotated_catalog_path}.with_allele_frequencies.json.gz {annotated_catalog_path}", step_number=31)
 
     # Add TenK10K population statistics annotations
     if args.tenk10k_annotations:
         run(f"""python3 {base_dir}/scripts/add_TenK10K_annotations_to_catalog.py \
             --tsv-path {args.tenk10k_annotations} \
             -o {annotated_catalog_path}.with_TenK10K_annotations.json.gz \
-            {annotated_catalog_path}""", step_number=28)
-        run(f"mv {annotated_catalog_path}.with_TenK10K_annotations.json.gz {annotated_catalog_path}", step_number=29)
+            {annotated_catalog_path}""", step_number=32)
+        run(f"mv {annotated_catalog_path}.with_TenK10K_annotations.json.gz {annotated_catalog_path}", step_number=33)
 
     # Add HPRC256 population statistics annotations
     if args.hprc256_annotations:
         run(f"""python3 {base_dir}/scripts/add_HPRC256_annotations_to_catalog.py \
             --tsv-path {args.hprc256_annotations} \
             -o {annotated_catalog_path}.with_HPRC256_annotations.json.gz \
-            {annotated_catalog_path}""", step_number=30)
-        run(f"mv {annotated_catalog_path}.with_HPRC256_annotations.json.gz {annotated_catalog_path}", step_number=31)
+            {annotated_catalog_path}""", step_number=34)
+        run(f"mv {annotated_catalog_path}.with_HPRC256_annotations.json.gz {annotated_catalog_path}", step_number=35)
 
     # Add AoU1027 population statistics annotations
     if args.aou1027_annotations:
         run(f"""python3 {base_dir}/scripts/add_AoU_annotations_to_catalog.py \
             --tsv-path {args.aou1027_annotations} \
             -o {annotated_catalog_path}.with_AoU1027_annotations.json.gz \
-            {annotated_catalog_path}""", step_number=32)
-        run(f"mv {annotated_catalog_path}.with_AoU1027_annotations.json.gz {annotated_catalog_path}", step_number=33)
+            {annotated_catalog_path}""", step_number=36)
+        run(f"mv {annotated_catalog_path}.with_AoU1027_annotations.json.gz {annotated_catalog_path}", step_number=37)
 
     # annotate with "TRsInRegion" based on adjacent loci
     if motif_size_label == "1_to_1000bp_motifs":
@@ -580,7 +620,7 @@ EOF
 
     # convert to BED
     run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_bed --split-adjacent-repeats "
-        f"{annotated_catalog_path}  --output-file {output_prefix}.bed.gz", step_number=34)
+        f"{annotated_catalog_path}  --output-file {output_prefix}.bed.gz", step_number=38)
 
     run(f"python3 -m str_analysis.add_adjacent_loci_to_expansion_hunter_catalog "
         f"--ref-fasta {args.hg38_reference_fasta} "
@@ -588,9 +628,9 @@ EOF
         f"--add-extra-field TRsInRegion "
         f"--only-add-extra-fields "
         f"-o {annotated_catalog_path}.with_adjacent_loci_annotation.json.gz "
-        f"{annotated_catalog_path}", step_number=35)
+        f"{annotated_catalog_path}", step_number=39)
 
-    run(f"mv {annotated_catalog_path}.with_adjacent_loci_annotation.json.gz {annotated_catalog_path}", step_number=36)
+    run(f"mv {annotated_catalog_path}.with_adjacent_loci_annotation.json.gz {annotated_catalog_path}", step_number=40)
 
 
     # convert to TSV
@@ -629,32 +669,41 @@ output_tsv_path = "{annotated_catalog_path.replace('.json.gz', '') + '.tsv.gz'}"
 df.to_csv(output_tsv_path, sep="\\t", index=False)
 print(f"Wrote {{len(df):,d}} rows to {{output_tsv_path}} with columns: {{pformat(list(df.columns))}}")
 EOF
-""", step_number=37)
+""", step_number=41)
 
     # convert the catalog from ExpansionHunter catalog format to TRGT, LongTR, HipSTR, and GangSTR formats
-    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_trgt_catalog -R {args.hg38_reference_fasta} --split-adjacent-repeats {annotated_catalog_path}  --output-file {output_prefix}.TRGT.bed", step_number=38)
-    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_longtr_format  {annotated_catalog_path}  --output-file {output_prefix}.LongTR.bed", step_number=39)
-    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_hipstr_format  {annotated_catalog_path}  --output-file {output_prefix}.HipSTR.bed", step_number=40)
-    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_gangstr_spec   {annotated_catalog_path}  --output-file {output_prefix}.GangSTR.bed", step_number=41)
+    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_trgt_catalog -R {args.hg38_reference_fasta} --split-adjacent-repeats {annotated_catalog_path}  --output-file {output_prefix}.TRGT.bed", step_number=42)
+    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_longtr_format  {annotated_catalog_path}  --output-file {output_prefix}.LongTR.bed", step_number=43)
+    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_hipstr_format  {annotated_catalog_path}  --output-file {output_prefix}.HipSTR.bed", step_number=44)
+    run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_gangstr_spec   {annotated_catalog_path}  --output-file {output_prefix}.GangSTR.bed", step_number=45)
 
     # ATaRVa (https://github.com/SowpatiLab/ATaRVa) reads a 5-column BED: chromosome, start, end,
     # motif, motif length. It reads one motif per row, hence --split-adjacent-repeats, and requires
     # the file to be bgzipped and tabix-indexed, which the converter does for a .gz output path.
     run(f"python3 -m str_analysis.convert_expansion_hunter_catalog_to_bed --split-adjacent-repeats "
         f"--motif-size-column {annotated_catalog_path}  --output-file {output_prefix}.ATaRVa.bed.gz",
-        step_number=42)
+        step_number=46)
 
     # Confirm that the TRGT catalog passes 'trgt validate'
-    run(f"trgt validate --genome {args.hg38_reference_fasta}  --repeats {output_prefix}.TRGT.bed", step_number=43)
+    run(f"trgt validate --genome {args.hg38_reference_fasta}  --repeats {output_prefix}.TRGT.bed", step_number=47)
+
+    # Check that the combined catalog's repeat rows still reproduce the repeat catalog. This runs
+    # here rather than beside the steps that build the combined catalog because it compares against
+    # {output_prefix}.TRGT.bed, which step 41 writes well after those steps. The guard repeats the
+    # one on the block that defines the filename.
+    if args.variation_clusters_tsv and not args.skip_variation_cluster_annotations:
+        run(f"""python3 {base_dir}/scripts/validate_variation_clusters_catalog.py \
+            {variation_clusters_and_all_repeats_release_filename} \
+            {output_prefix}.TRGT.bed""", step_number=48)
 
     # Print missing values
-    run(f"python3 {base_dir}/scripts/print_missing_values_percentages_in_json_or_tsv.py  {annotated_catalog_path}", step_number=44)
+    run(f"python3 {base_dir}/scripts/print_missing_values_percentages_in_json_or_tsv.py  {annotated_catalog_path}", step_number=49)
 
     # Perform basic internal consistency checks on the JSON catalog
     run(f"python3 {base_dir}/scripts/validate_catalog.py " +
         f"--known-pathogenic-loci-json-path {source_catalog_paths['TRExplorerV1:KnownDiseaseAssociatedLoci']} " +
         ("--check-for-presence-of-annotations --check-for-presence-of-all-known-loci --check-for-presence-of-all-loci-from-v1 " if motif_size_label == "1_to_1000bp_motifs" else "") +
-        f"{annotated_catalog_path}", step_number=45)
+        f"{annotated_catalog_path}", step_number=50)
 
     # copy files to the release_draft folder and compute catalog stats
     updated_release_files = []
@@ -663,7 +712,7 @@ EOF
             updated_release_files.append(f"{path}.gz")
         else:
             if path.endswith(".json") or path.endswith(".json.gz") and ".EH." in path:
-                run(f"python3 {base_dir}/scripts/validate_json.py -k LocusId -k LocusStructure -k ReferenceRegion -k VariantType {path}", step_number=46)
+                run(f"python3 {base_dir}/scripts/validate_json.py -k LocusId -k LocusStructure -k ReferenceRegion -k VariantType {path}", step_number=51)
             updated_release_files.append(path)
 
     # Compress and tabix-index the release BEDs so users can query them by region. Compression and
@@ -685,20 +734,20 @@ EOF
             prepare = f"bgzip -f -d {path} && bgzip -f {uncompressed} && "
         else:
             prepare = ""
-        run(f"{prepare}tabix -f {tabix_coordinate_flags(path)} {path}", step_number=47)
+        run(f"{prepare}tabix -f {tabix_coordinate_flags(path)} {path}", step_number=52)
         updated_release_files.append(f"{path}.tbi")
 
     if release_tar_gz_path is None:
         for path in updated_release_files:
-            run(f"cp {path} {release_draft_folder}", step_number=48)
+            run(f"cp {path} {release_draft_folder}", step_number=53)
     else:
-        run(f"tar czf {release_tar_gz_path} -C {os.path.dirname(output_prefix)} " + " ".join([os.path.basename(p) for p in updated_release_files]), step_number=49)
-        run(f"cp {release_tar_gz_path} {release_draft_folder}", step_number=50)
+        run(f"tar czf {release_tar_gz_path} -C {os.path.dirname(output_prefix)} " + " ".join([os.path.basename(p) for p in updated_release_files]), step_number=54)
+        run(f"cp {release_tar_gz_path} {release_draft_folder}", step_number=55)
 
-    run(f"python3 -m str_analysis.compute_catalog_stats --reference-fasta {args.hg38_reference_fasta} --verbose {annotated_catalog_path}", step_number=51)
+    run(f"python3 -m str_analysis.compute_catalog_stats --reference-fasta {args.hg38_reference_fasta} --verbose {annotated_catalog_path}", step_number=56)
 
     # Print source statistics table
-    run(f"python3 {base_dir}/scripts/generate_catalog_sources_stats_table.py {release_draft_folder}/{os.path.basename(annotated_catalog_path)}", step_number=52)
+    run(f"python3 {base_dir}/scripts/generate_catalog_sources_stats_table.py {release_draft_folder}/{os.path.basename(annotated_catalog_path)}", step_number=57)
 
     # report hours, minutes, seconds relative to script_start_time
     diff = time.time() - script_start_time
@@ -720,7 +769,7 @@ EOF
         comparison_catalog_paths[catalog_name] = os.path.abspath(os.path.basename(url))
 
     path_after_conversion = comparison_catalog_paths["GangSTR_v17"].replace(".bed.gz", ".json.gz")
-    run(f"python3 -u -m str_analysis.convert_gangstr_spec_to_expansion_hunter_catalog --verbose {comparison_catalog_paths['GangSTR_v17']} -o {path_after_conversion}", step_number=53)
+    run(f"python3 -u -m str_analysis.convert_gangstr_spec_to_expansion_hunter_catalog --verbose {comparison_catalog_paths['GangSTR_v17']} -o {path_after_conversion}", step_number=58)
     comparison_catalog_paths["GangSTR_v17"] = path_after_conversion
 
     # compare catalog to other catalogs
@@ -738,9 +787,9 @@ EOF
             --max-motif-size {max_motif_size} \
             --output-path {filtered_comparison_catalog_path} \
             --verbose \
-            {path}""", step_number=54)
+            {path}""", step_number=59)
 
-        run(f"python3 -m str_analysis.compute_catalog_stats --reference-fasta {args.hg38_reference_fasta} --verbose {filtered_comparison_catalog_path}", step_number=55)
+        run(f"python3 -m str_analysis.compute_catalog_stats --reference-fasta {args.hg38_reference_fasta} --verbose {filtered_comparison_catalog_path}", step_number=60)
 
         run(f"""python3 -u -m str_analysis.merge_loci \
             --output-prefix {catalog_name} \
@@ -749,7 +798,7 @@ EOF
             --verbose \
             --write-merge-stats-tsv \
             {annotated_catalog_path} \
-            {filtered_comparison_catalog_path}""", step_number=56)
+            {filtered_comparison_catalog_path}""", step_number=61)
 
     diff = time.time() - start_time
     print(f"Done with comparisons. Took {diff//3600:.0f}h, {(diff%3600)//60:.0f}m, {diff%60:.0f}s")

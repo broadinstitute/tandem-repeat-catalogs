@@ -1,7 +1,10 @@
 """This script takes a TSV file of variation clusters and a JSON file of all tandem repeats
 and writes out a TRGT catalog with:
-1. Variation clusters (loci with non-zero offsets, grouped by vc_region)
-2. Isolated repeats (loci with zero offsets, using original_region coordinates)
+1. Variation clusters: loci grouped by vc_region, for every vc_region shared by more than one
+   locus. A cluster's widest member spans the whole vc_region, so it can't be told apart from a
+   genuinely solo locus by its own offset from vc_region; membership is decided by how many loci
+   land on the same vc_region instead (https://github.com/PacificBiosciences/trgt-lps/issues/5).
+2. Isolated repeats: every other locus, using its own original_region coordinates.
 3. Any tandem repeats from the catalog that aren't in the TSV (restored from catalog)
 
 Loci filtered due to DEPTH or EXTENSION are excluded entirely.
@@ -67,9 +70,8 @@ def main():
     # Data structures to collect variation clusters (grouped by vc_region)
     # and isolated repeats
     vc_region_to_loci = collections.defaultdict(list)  # vc_region -> list of (locus_id, motifs)
-    isolated_repeats = []  # list of (chrom, start, end, locus_id, motifs)
+    locus_id_to_original_region_and_motifs = {}  # locus_id -> (original_region, motifs), for every non-filtered locus
 
-    locus_ids_in_variation_clusters = set()
     locus_ids_isolated_repeats = set()
     locus_ids_filtered = set()
 
@@ -90,7 +92,6 @@ def main():
             # Parse TSV columns
             region_info = fields[0]
             original_region = fields[1]
-            vc_start_offset = fields[2]
             vc_end_offset = fields[3]
             vc_region = fields[4] if len(fields) > 4 else ""
 
@@ -104,28 +105,28 @@ def main():
                 locus_ids_filtered.add(locus_id)
                 continue
 
-            # Parse offsets
-            try:
-                start_offset = float(vc_start_offset) if vc_start_offset else 0.0
-                end_offset = float(vc_end_offset) if vc_end_offset else 0.0
-            except ValueError:
-                print(f"WARNING: Could not parse offsets for locus {locus_id}: start='{vc_start_offset}', end='{vc_end_offset}'")
+            if not vc_region:
+                print(f"WARNING: Empty vc_region for locus {locus_id}")
                 continue
 
-            # Determine if this is a VC or isolated TR
-            if start_offset != 0 or end_offset != 0:
-                # Variation cluster - group by vc_region
-                if not vc_region:
-                    print(f"WARNING: Non-zero offsets but empty vc_region for locus {locus_id}")
-                    continue
+            vc_region_to_loci[vc_region].append((locus_id, motifs))
+            locus_id_to_original_region_and_motifs[locus_id] = (original_region, motifs)
 
-                vc_region_to_loci[vc_region].append((locus_id, motifs))
-                locus_ids_in_variation_clusters.add(locus_id)
-            else:
-                # Isolated repeat - store for later output
-                chrom, start, end = parse_interval(original_region)
-                isolated_repeats.append((chrom, start, end, locus_id, motifs))
-                locus_ids_isolated_repeats.add(locus_id)
+    # A vc_region shared by only one locus is that locus's own region, not a cluster: the widest
+    # member of a real cluster spans the whole vc_region and so also looks like it "stands alone"
+    # if judged by its own offset from vc_region. So membership is decided here instead, by how
+    # many loci land on a given vc_region.
+    vc_region_to_loci = {region: loci for region, loci in vc_region_to_loci.items() if len(loci) > 1}
+    locus_ids_in_variation_clusters = {locus_id for loci in vc_region_to_loci.values() for locus_id, _ in loci}
+
+    # Everything else that had a row in the TSV is an isolated repeat.
+    isolated_repeats = []
+    for locus_id, (original_region, motifs) in locus_id_to_original_region_and_motifs.items():
+        if locus_id in locus_ids_in_variation_clusters:
+            continue
+        chrom, start, end = parse_interval(original_region)
+        isolated_repeats.append((chrom, start, end, locus_id, motifs))
+        locus_ids_isolated_repeats.add(locus_id)
 
     print(f"Parsed TSV: {len(vc_region_to_loci):,d} variation clusters containing {len(locus_ids_in_variation_clusters):,d} loci, "
           f"{len(locus_ids_isolated_repeats):,d} isolated repeats, "

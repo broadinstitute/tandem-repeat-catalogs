@@ -112,7 +112,10 @@ def main():
                 loci_with_filter_reason += 1
                 continue
 
-            # Parse offsets as floats
+            # Parse offsets as floats, purely for the diagnostic counts below. Offset can't be used
+            # to decide cluster membership: the widest member of a real cluster spans the whole
+            # vc_region and so also has offset 0/0, same as a genuinely solo locus. Membership is
+            # decided after the loop instead, by how many loci land on the same vc_region.
             try:
                 start_offset = float(vc_start_offset) if vc_start_offset else 0.0
                 end_offset = float(vc_end_offset) if vc_end_offset else 0.0
@@ -122,9 +125,8 @@ def main():
 
             if start_offset == 0 and end_offset == 0:
                 loci_with_zero_offset += 1
-                continue
-
-            loci_with_nonzero_offsets += 1
+            else:
+                loci_with_nonzero_offsets += 1
 
             # Record (locus_id, motifs) as a member of vc_region, and remember vc_region as a
             # candidate VC for this locus. Both directions are needed: vc_region->members to build
@@ -138,6 +140,20 @@ def main():
 
             orig_chrom, orig_start, orig_end = parse_interval(original_region)
             locus_id_to_original_length[locus_id] = orig_end - orig_start
+
+    # A vc_region shared by only one locus is that locus's own region, not a cluster: the widest
+    # member of a real cluster spans the whole vc_region and so also looks solo by the offset
+    # check above. So membership is decided here instead, by how many loci land on a given
+    # vc_region, and only those loci keep it as a candidate.
+    vc_region_to_members = {region: members for region, members in vc_region_to_members.items()
+                             if len(members) > 1}
+    locus_id_to_candidate_vc_regions = {
+        locus_id: [vc_region for vc_region in candidates if vc_region in vc_region_to_members]
+        for locus_id, candidates in locus_id_to_candidate_vc_regions.items()
+    }
+    locus_id_to_candidate_vc_regions = {
+        locus_id: candidates for locus_id, candidates in locus_id_to_candidate_vc_regions.items() if candidates
+    }
 
     # For each locus, pick the widest vc_region from its candidate list. Today every list has
     # length 1, so "widest" is trivially the only entry; if future TSVs list a TRID under

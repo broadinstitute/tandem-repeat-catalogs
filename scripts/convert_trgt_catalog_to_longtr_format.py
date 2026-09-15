@@ -72,6 +72,13 @@ def main():
     parser.add_argument("-o", "--output-bed-path", help="Path of output BED file.")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--show-progress-bar", action="store_true", help="Show a progress bar")
+    parser.add_argument("--name-clusters-by-trid", action="store_true",
+                        help="Name a variation cluster row by its own TRID instead of by the "
+                             "repeats it contains. Needed when the input also gives every repeat "
+                             "a row of its own, because a cluster holding a single repeat would "
+                             "otherwise produce two rows with the same name at different "
+                             "coordinates. Leave it off for a catalog whose cluster members have "
+                             "no rows of their own, so their names stay as they were.")
     parser.add_argument("input_trgt_catalog_bed_path", help="Path of the input TRGT catalog BED file")
     args = parser.parse_args()
 
@@ -115,7 +122,9 @@ def main():
                 start_0based + 1,  # LongTR BED files use 1-based coords
                 end_1based,
                 motif,
-                ",".join(get_constituent_locus_ids(info_field_dict)),
+                info_field_dict["ID"]
+                if args.name_clusters_by_trid and info_field_dict["ID"].startswith("VC:")
+                else ",".join(get_constituent_locus_ids(info_field_dict)),
             ])) + "\n")
 
     # Close before compressing, otherwise bgzip reads the file while the last buffer of output rows

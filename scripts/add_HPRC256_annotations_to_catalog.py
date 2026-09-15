@@ -58,6 +58,14 @@ def main():
 
     print(f"Loaded {len(df):,d} rows from TSV")
 
+    # The annotation lookup below is keyed by locus_id alone, so a duplicate locus_id would
+    # silently overwrite an earlier row's annotations rather than raising. This is the failure mode
+    # of https://github.com/PacificBiosciences/trgt-lps/issues/5, just one step downstream of it.
+    duplicate_locus_ids = df["locus_id"][df["locus_id"].duplicated()].unique()
+    if len(duplicate_locus_ids) > 0:
+        parser.error(f"{args.tsv_path} has {len(duplicate_locus_ids):,d} duplicate locus_id values, "
+                     f"e.g. {list(duplicate_locus_ids[:5])}")
+
     # Compute stdev rank by motif
     print("Computing stdev ranks by canonical motif")
     df["canonical_motif"] = df["motif"].apply(compute_canonical_motif)
